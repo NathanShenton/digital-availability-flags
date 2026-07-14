@@ -2,7 +2,7 @@
 name = "digital-availability-flags"
 version = "0.1.0"
 description = "A Streamlit tool for generating GB and IE digital availability flag upload files."
-requires-python = ">=3.14"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "streamlit>=1.59.0",
     "pandas>=2.2.0",
