@@ -1,11 +1,12 @@
 [project]
-name = "blank-app-template"
+name = "web-attribute-bulk-builder"
 version = "0.1.0"
-description = "A simple Streamlit app template."
-readme = "README.md"
+description = "A Streamlit tool for generating GB and IE web attribute bulk-load files."
 requires-python = ">=3.14"
 dependencies = [
     "streamlit>=1.59.2",
+    "pandas>=2.2",
+    "XlsxWriter>=3.2",
 ]
 
 [tool.uv]
