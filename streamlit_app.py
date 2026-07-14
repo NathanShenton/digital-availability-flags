@@ -1,10 +1,11 @@
 import io
 import re
+import zipfile
+from xml.sax.saxutils import escape
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-import xlsxwriter
 
 
 # -----------------------------------------------------------------------------
@@ -137,86 +138,157 @@ def build_output(skus: list[str]) -> pd.DataFrame:
 
 
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Create a formatted Excel workbook entirely in memory."""
+    """Create a valid .xlsx workbook without optional Excel packages."""
     output = io.BytesIO()
 
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="Web Attributes")
+    def excel_column_name(column_number: int) -> str:
+        result = ""
+        while column_number:
+            column_number, remainder = divmod(column_number - 1, 26)
+            result = chr(65 + remainder) + result
+        return result
 
-        workbook = writer.book
-        worksheet = writer.sheets["Web Attributes"]
-
-        header_format = workbook.add_format(
-            {
-                "bold": True,
-                "font_color": "#FFFFFF",
-                "bg_color": "#008577",
-                "border": 1,
-                "align": "center",
-                "valign": "vcenter",
-            }
-        )
-        text_format = workbook.add_format({"num_format": "@"})
-        true_format = workbook.add_format(
-            {"bg_color": "#E2F0D9", "font_color": "#375623"}
-        )
-        false_format = workbook.add_format(
-            {"bg_color": "#FCE4D6", "font_color": "#843C0C"}
+    def inline_string_cell(reference: str, value: object, style_id: int = 0) -> str:
+        text = escape("" if value is None else str(value))
+        style = f' s="{style_id}"' if style_id else ""
+        return (
+            f'<c r="{reference}" t="inlineStr"{style}>'
+            f'<is><t xml:space="preserve">{text}</t></is></c>'
         )
 
-        for column_number, column_name in enumerate(df.columns):
-            worksheet.write(0, column_number, column_name, header_format)
+    columns = list(df.columns)
+    row_count = len(df) + 1
+    last_column = excel_column_name(len(columns))
+    worksheet_rows: list[str] = []
 
-        # Keep SKU as text so values such as 062994 retain their leading zero.
-        worksheet.set_column("A:A", 16, text_format)
-        worksheet.set_column("B:B", 66)
-        worksheet.set_column("C:C", 24)
-        worksheet.set_column("D:D", 12)
-        worksheet.set_column("E:E", 10)
-        worksheet.freeze_panes(1, 0)
-        worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
+    header_cells = [
+        inline_string_cell(f"{excel_column_name(index)}1", column, 1)
+        for index, column in enumerate(columns, start=1)
+    ]
+    worksheet_rows.append(
+        f'<row r="1" ht="22" customHeight="1">{"".join(header_cells)}</row>'
+    )
 
-        if not df.empty:
-            worksheet.conditional_format(
-                1,
-                3,
-                len(df),
-                3,
-                {
-                    "type": "text",
-                    "criteria": "containing",
-                    "value": "TRUE",
-                    "format": true_format,
-                },
-            )
-            worksheet.conditional_format(
-                1,
-                3,
-                len(df),
-                3,
-                {
-                    "type": "text",
-                    "criteria": "containing",
-                    "value": "FALSE",
-                    "format": false_format,
-                },
-            )
+    for excel_row, values in enumerate(df.itertuples(index=False, name=None), start=2):
+        cells: list[str] = []
+        for column_number, value in enumerate(values, start=1):
+            style_id = 0
+            if column_number == 1:
+                style_id = 2
+            elif column_number == 4:
+                style_id = 3 if str(value) == "TRUE" else 4
 
-        worksheet.add_table(
-            0,
-            0,
-            len(df),
-            len(df.columns) - 1,
-            {
-                "name": "WebAttributeUpload",
-                "columns": [{"header": column} for column in df.columns],
-                "style": "Table Style Medium 4",
-            },
-        )
+            reference = f"{excel_column_name(column_number)}{excel_row}"
+            cells.append(inline_string_cell(reference, value, style_id))
+
+        worksheet_rows.append(f'<row r="{excel_row}">{"".join(cells)}</row>')
+
+    worksheet_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheetViews><sheetView workbookViewId="0">'
+        '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
+        '<selection pane="bottomLeft" activeCell="A2" sqref="A2"/>'
+        '</sheetView></sheetViews>'
+        '<sheetFormatPr defaultRowHeight="15"/>'
+        '<cols>'
+        '<col min="1" max="1" width="16" customWidth="1"/>'
+        '<col min="2" max="2" width="66" customWidth="1"/>'
+        '<col min="3" max="3" width="24" customWidth="1"/>'
+        '<col min="4" max="4" width="12" customWidth="1"/>'
+        '<col min="5" max="5" width="10" customWidth="1"/>'
+        '</cols>'
+        f'<sheetData>{"".join(worksheet_rows)}</sheetData>'
+        f'<autoFilter ref="A1:{last_column}{row_count}"/>'
+        '</worksheet>'
+    )
+
+    content_types_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>'''
+
+    root_relationships_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>'''
+
+    workbook_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Web Attributes" sheetId="1" r:id="rId1"/></sheets>
+</workbook>'''
+
+    workbook_relationships_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>'''
+
+    styles_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="1"><numFmt numFmtId="164" formatCode="@"/></numFmts>
+  <fonts count="4">
+    <font><sz val="11"/><name val="Calibri"/><family val="2"/></font>
+    <font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Calibri"/></font>
+    <font><color rgb="FF375623"/><sz val="11"/><name val="Calibri"/></font>
+    <font><color rgb="FF843C0C"/><sz val="11"/><name val="Calibri"/></font>
+  </fonts>
+  <fills count="5">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FF008577"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFE2F0D9"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFCE4D6"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="2">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+    <border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="thin"/><diagonal/></border>
+  </borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="5">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="3" fillId="4" borderId="0" xfId="0"/>
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>'''
+
+    created = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    core_xml = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:creator>Streamlit</dc:creator>
+  <cp:lastModifiedBy>Streamlit</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">{created}</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">{created}</dcterms:modified>
+</cp:coreProperties>'''
+
+    app_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>Streamlit</Application>
+</Properties>'''
+
+    with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as workbook:
+        workbook.writestr("[Content_Types].xml", content_types_xml)
+        workbook.writestr("_rels/.rels", root_relationships_xml)
+        workbook.writestr("xl/workbook.xml", workbook_xml)
+        workbook.writestr("xl/_rels/workbook.xml.rels", workbook_relationships_xml)
+        workbook.writestr("xl/worksheets/sheet1.xml", worksheet_xml)
+        workbook.writestr("xl/styles.xml", styles_xml)
+        workbook.writestr("docProps/core.xml", core_xml)
+        workbook.writestr("docProps/app.xml", app_xml)
 
     output.seek(0)
     return output.getvalue()
-
 
 def render_country_controls(country_code: str, country_name: str) -> None:
     """Render the controls for one country in a layout similar to the PIM UI."""
